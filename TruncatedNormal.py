@@ -1,7 +1,9 @@
 import math
 from numbers import Number
+from typing import Optional, TypeAlias, Union
 
 import torch
+from torch import Tensor
 from torch.distributions import Distribution, constraints
 from torch.distributions.utils import broadcast_all
 
@@ -12,6 +14,8 @@ CONST_LOG_INV_SQRT_2PI = math.log(CONST_INV_SQRT_2PI)
 CONST_LOG_SQRT_2PI_E = 0.5 * math.log(2 * math.pi * math.e)
 
 
+Numeric: TypeAlias = Union[float, Number, Tensor]
+
 class TruncatedStandardNormal(Distribution):
     """
     Truncated Standard Normal distribution
@@ -21,21 +25,29 @@ class TruncatedStandardNormal(Distribution):
     arg_constraints = {
         'a': constraints.real,
         'b': constraints.real,
-    }
+    } # type: ignore
     has_rsample = True
 
-    def __init__(self, a, b, validate_args=None):
-        self.a, self.b = broadcast_all(a, b)
-        if isinstance(a, Number) and isinstance(b, Number):
-            batch_shape = torch.Size()
-        else:
-            batch_shape = self.a.size()
-        super(TruncatedStandardNormal, self).__init__(batch_shape, validate_args=validate_args)
-        if self.a.dtype != self.b.dtype:
+    def __init__(
+            self,
+            a: Numeric,
+            b: Numeric,
+            validate_args: Optional[bool] = None,
+    ):
+        a, b = broadcast_all(a, b)
+        assert isinstance(a, Tensor) and isinstance(b, Tensor)
+        assert a.shape == b.shape
+        if a.dtype != b.dtype:
             raise ValueError('Truncation bounds types are different')
-        if any((self.a >= self.b).view(-1,).tolist()):
+        if (a >= b).any():
             raise ValueError('Incorrect truncation range')
-        eps = torch.finfo(self.a.dtype).eps
+
+        self.a, self.b = a, b
+        super(TruncatedStandardNormal, self).__init__(
+            batch_shape=a.shape,
+            validate_args=validate_args,
+        )
+        eps = torch.finfo(a.dtype).eps
         self._dtype_min_gt_0 = eps
         self._dtype_max_lt_1 = 1 - eps
         self._little_phi_a = self._little_phi(self.a)
@@ -72,31 +84,31 @@ class TruncatedStandardNormal(Distribution):
         return self._Z
 
     @staticmethod
-    def _little_phi(x):
+    def _little_phi(x: Tensor) -> Tensor:
         return (-(x ** 2) * 0.5).exp() * CONST_INV_SQRT_2PI
 
     @staticmethod
-    def _big_phi(x):
+    def _big_phi(x: Tensor) -> Tensor:
         return 0.5 * (1 + (x * CONST_INV_SQRT_2).erf())
 
     @staticmethod
-    def _inv_big_phi(x):
+    def _inv_big_phi(x: Tensor) -> Tensor:
         return CONST_SQRT_2 * (2 * x - 1).erfinv()
 
-    def cdf(self, value):
+    def cdf(self, value: Tensor) -> Tensor:
         if self._validate_args:
             self._validate_sample(value)
         return ((self._big_phi(value) - self._big_phi_a) / self._Z).clamp(0, 1)
 
-    def icdf(self, value):
+    def icdf(self, value: Tensor) -> Tensor:
         return self._inv_big_phi(self._big_phi_a + value * self._Z)
 
-    def log_prob(self, value):
+    def log_prob(self, value: Tensor) -> Tensor:
         if self._validate_args:
             self._validate_sample(value)
         return CONST_LOG_INV_SQRT_2PI - self._log_Z - (value ** 2) * 0.5
 
-    def rsample(self, sample_shape=torch.Size()):
+    def rsample(self, sample_shape: torch.Size = torch.Size()) -> Tensor:
         shape = self._extended_shape(sample_shape)
         p = torch.empty(shape, device=self.a.device).uniform_(self._dtype_min_gt_0, self._dtype_max_lt_1)
         return self.icdf(p)
@@ -108,29 +120,54 @@ class TruncatedNormal(TruncatedStandardNormal):
     https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
     """
 
+    arg_constraints = {
+        **TruncatedStandardNormal.arg_constraints, # type: ignore
+        'loc': constraints.real,
+        'scale': constraints.real,
+    } # type: ignore
     has_rsample = True
 
-    def __init__(self, loc, scale, a, b, validate_args=None):
-        self.loc, self.scale, a, b = broadcast_all(loc, scale, a, b)
-        a = (a - self.loc) / self.scale
-        b = (b - self.loc) / self.scale
-        super(TruncatedNormal, self).__init__(a, b, validate_args=validate_args)
-        self._log_scale = self.scale.log()
-        self._mean = self._mean * self.scale + self.loc
-        self._variance = self._variance * self.scale ** 2
+    def __init__(
+            self,
+            loc: Numeric,
+            scale: Numeric,
+            a: Numeric,
+            b: Numeric,
+            validate_args: Optional[bool] = None,
+    ):
+        loc, scale, a, b = broadcast_all(loc, scale, a, b)
+        assert isinstance(loc, Tensor)
+        assert isinstance(scale, Tensor)
+        assert isinstance(a, Tensor)
+        assert isinstance(b, Tensor)
+        assert loc.shape == scale.shape == a.shape == b.shape
+        assert loc.isfinite().all()
+        assert (scale > 0.0).all()
+        a = (a - loc) / scale
+        b = (b - loc) / scale
+        self.loc, self.scale = loc, scale
+        super(TruncatedNormal, self).__init__(
+            a=a,
+            b=b,
+            validate_args=validate_args,
+        )
+
+        self._log_scale = scale.log()
+        self._mean = self._mean * scale + self.loc
+        self._variance = self._variance * scale ** 2
         self._entropy += self._log_scale
 
-    def _to_std_rv(self, value):
+    def _to_std_rv(self, value: Tensor) -> Tensor:
         return (value - self.loc) / self.scale
 
-    def _from_std_rv(self, value):
+    def _from_std_rv(self, value: Tensor) -> Tensor:
         return value * self.scale + self.loc
 
-    def cdf(self, value):
+    def cdf(self, value: Tensor) -> Tensor:
         return super(TruncatedNormal, self).cdf(self._to_std_rv(value))
 
-    def icdf(self, value):
+    def icdf(self, value: Tensor) -> Tensor:
         return self._from_std_rv(super(TruncatedNormal, self).icdf(value))
 
-    def log_prob(self, value):
+    def log_prob(self, value: Tensor) -> Tensor:
         return super(TruncatedNormal, self).log_prob(self._to_std_rv(value)) - self._log_scale
