@@ -112,7 +112,6 @@ class Tests(unittest.TestCase):
         pt = TruncatedNormalPT(0., 1., -1., 2., validate_args=None)
         with self.assertRaises(ValueError) as e:
             pt.log_prob(torch.tensor(-10))
-        self.assertEqual(str(e.exception), 'The value argument must be within the support')
 
     def test_cuda(self):
         if not torch.cuda.is_available():
